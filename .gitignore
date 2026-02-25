@@ -1,0 +1,24 @@
+# Environment variables
+.env
+
+# Virtual environments
+venv/
+faceenv/
+env/
+.venv/
+
+# Dataset (candidate photos - privacy)
+dataset/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Reports (generated automatically)
+authenticated_report.pdf
+declined_report.pdf
+
+# IDE
+.vscode/
+.idea/
