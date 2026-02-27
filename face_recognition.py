@@ -69,7 +69,7 @@ class Face_Recognition:
         # ── Smile liveness check ──────────────────────────────────────────
         self.smile_timer_started = False
         self.smile_start_time    = 0
-        self.smile_hold_seconds  = 2        # how long the user must hold the smile
+        self.smile_hold_seconds  = 1        # how long the user must hold the smile
 
     def rounded_rect(self, canvas, x1, y1, x2, y2, r, **kwargs):
         points = [x1+r, y1, x2-r, y1, x2, y1, x2, y1+r,
