@@ -219,6 +219,117 @@ class ReportsViewer:
         self._update_pill(self.pass_lbl,  verified_count)
         self._update_pill(self.fail_lbl,  declined_count)
 
+    def generate_reports(self):
+        """Called externally (e.g. from face_recognition.py) to rebuild PDFs
+        from the same data the table shows — most recent session per candidate."""
+        import threading
+        threading.Thread(target=self._build_reports, daemon=True).start()
+
+    def _build_reports(self):
+        """Builds both PDFs using exactly the same query + dedup logic as
+        load_data(), so the PDF always matches what the table displays."""
+        try:
+            from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+            from reportlab.lib import colors as rl_colors
+            from reportlab.lib.styles import getSampleStyleSheet
+            from reportlab.lib.pagesizes import A4
+
+            style = getSampleStyleSheet()
+
+            # ── Fetch rows — same query as load_data ─────────────────────────
+            conn = mysql.connector.connect(**DB_CFG)
+            cur  = conn.cursor()
+            cur.execute("""
+                SELECT id, candidate_id, name, status, timestamp
+                FROM verification_log
+                ORDER BY timestamp DESC
+            """)
+            rows = cur.fetchall()
+
+            # ── Deduplicate: keep only most recent session per candidate ──────
+            seen = set()
+            unique_rows = []
+            for row in rows:
+                log_id, cid, name, status, ts = row
+                if cid not in seen:
+                    seen.add(cid)
+                    unique_rows.append(row)
+
+            # ── Pull phone + email for verified candidates from student table ─
+            verified_cids = [r[1] for r in unique_rows if r[3] == "VERIFIED"]
+            extras = {}
+            if verified_cids:
+                fmt = ",".join(["%s"] * len(verified_cids))
+                cur.execute(
+                    f"SELECT candidate_id, phone, email FROM student WHERE candidate_id IN ({fmt})",
+                    verified_cids
+                )
+                extras = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
+            conn.close()
+
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+
+            # ── Authenticated PDF ────────────────────────────────────────────
+            verified_rows = [r for r in unique_rows if r[3] == "VERIFIED"]
+            doc = SimpleDocTemplate(os.path.join(base_dir, "authenticated_report.pdf"), pagesize=A4)
+            elements = [
+                Paragraph("<b>Authenticated Candidates</b>", style["Title"]),
+                Spacer(1, 20)
+            ]
+            if verified_rows:
+                data = [["Name", "Candidate ID", "Phone", "Email"]]
+                for log_id, cid, name, status, ts in verified_rows:
+                    phone, email = extras.get(cid, ("-", "-"))
+                    data.append([name, str(cid), str(phone or "-"), email or "-"])
+                tbl = Table(data, colWidths=[130, 120, 100, 160])
+                tbl.setStyle(TableStyle([
+                    ('BACKGROUND',     (0, 0), (-1, 0), rl_colors.HexColor("#1E293B")),
+                    ('TEXTCOLOR',      (0, 0), (-1, 0), rl_colors.white),
+                    ('FONTNAME',       (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTSIZE',       (0, 0), (-1, -1), 8),
+                    ('GRID',           (0, 0), (-1, -1), 1, rl_colors.HexColor("#CBD5E1")),
+                    ('ALIGN',          (0, 0), (-1, -1), 'CENTER'),
+                    ('VALIGN',         (0, 0), (-1, -1), 'MIDDLE'),
+                    ('ROWBACKGROUNDS', (0, 1), (-1, -1),
+                     [rl_colors.white, rl_colors.HexColor("#F1F5F9")])
+                ]))
+                elements.append(tbl)
+            else:
+                elements.append(Paragraph("No authenticated records.", style["Normal"]))
+            doc.build(elements)
+
+            # ── Declined PDF ─────────────────────────────────────────────────
+            declined_rows = [r for r in unique_rows if r[3] != "VERIFIED"]
+            doc2 = SimpleDocTemplate(os.path.join(base_dir, "declined_report.pdf"), pagesize=A4)
+            elements2 = [
+                Paragraph("<b>Declined / Locked Candidates</b>", style["Title"]),
+                Spacer(1, 20)
+            ]
+            if declined_rows:
+                data2 = [["Name", "Candidate ID"]]
+                for log_id, cid, name, status, ts in declined_rows:
+                    data2.append([name, str(cid)])
+                tbl2 = Table(data2, colWidths=[250, 160])
+                tbl2.setStyle(TableStyle([
+                    ('BACKGROUND',     (0, 0), (-1, 0), rl_colors.HexColor("#7F1D1D")),
+                    ('TEXTCOLOR',      (0, 0), (-1, 0), rl_colors.white),
+                    ('FONTNAME',       (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTSIZE',       (0, 0), (-1, -1), 9),
+                    ('GRID',           (0, 0), (-1, -1), 1, rl_colors.HexColor("#FECACA")),
+                    ('ALIGN',          (0, 0), (-1, -1), 'CENTER'),
+                    ('VALIGN',         (0, 0), (-1, -1), 'MIDDLE'),
+                    ('ROWBACKGROUNDS', (0, 1), (-1, -1),
+                     [rl_colors.white, rl_colors.HexColor("#FEF2F2")])
+                ]))
+                elements2.append(tbl2)
+            else:
+                elements2.append(Paragraph("No declined records.", style["Normal"]))
+            doc2.build(elements2)
+
+            print("Reports updated: authenticated_report.pdf, declined_report.pdf")
+        except Exception as e:
+            print(f"Report generation error: {e}")
+
     def _open_pdf(self, filename):
         path = os.path.abspath(filename)
         if not os.path.exists(path):
@@ -248,7 +359,7 @@ class ReportsViewer:
         try:
             conn = mysql.connector.connect(**DB_CFG)
             cur  = conn.cursor()
-            cur.execute("DELETE FROM verification_log")
+            cur.execute("TRUNCATE TABLE verification_log")
             conn.commit()
             conn.close()
         except mysql.connector.Error as e:
