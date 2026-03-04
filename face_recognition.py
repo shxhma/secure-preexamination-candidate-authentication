@@ -196,8 +196,9 @@ class Face_Recognition:
             return []
 
     def log_verification(self, candidate_id, name, status):
-        """Write a verification result to the verification_log table (non-blocking)."""
-        def _write():
+        """Write a verification result then rebuild reports in the same thread —
+        prevents the race condition where the report query ran before the INSERT committed."""
+        def _write_then_report():
             try:
                 conn = mysql.connector.connect(**DB_CFG)
                 cur = conn.cursor()
@@ -210,105 +211,20 @@ class Face_Recognition:
                 print(f"Verification logged: {candidate_id} | {name} | {status}")
             except mysql.connector.Error as e:
                 print(f"Verification log error: {e}")
-        threading.Thread(target=_write, daemon=True).start()
+                return
+            self._build_reports()
+        threading.Thread(target=_write_then_report, daemon=True).start()
 
     def generate_reports(self):
-        threading.Thread(target=self._build_reports, daemon=True).start()
+        # Reports are now built inside log_verification — kept for safety
+        pass
 
     def _build_reports(self):
+        """Delegates to ReportsViewer._build_reports so the PDF always uses
+        the exact same query and deduplication logic as the table display."""
         try:
-            style = getSampleStyleSheet()
-
-            conn = mysql.connector.connect(**DB_CFG)
-            cur = conn.cursor()
-
-            # ── Fetch ALL verified sessions (not just latest per candidate) ──
-            cur.execute("""
-                SELECT v.candidate_id, v.name, v.timestamp
-                FROM verification_log v
-                WHERE v.status = 'VERIFIED'
-                ORDER BY v.timestamp DESC
-            """)
-            verified_rows = cur.fetchall()
-            extras = {}
-            if verified_rows:
-                cids = list({r[0] for r in verified_rows})
-                fmt  = ",".join(["%s"] * len(cids))
-                cur.execute(
-                    f"SELECT candidate_id, phone, email FROM student WHERE candidate_id IN ({fmt})",
-                    cids
-                )
-                extras = {row[0]: (row[1], row[2]) for row in cur.fetchall()}
-
-            # ── Fetch ALL declined sessions ──────────────────────────────────
-            cur.execute("""
-                SELECT candidate_id, name, timestamp
-                FROM verification_log
-                WHERE status = 'DECLINED'
-                ORDER BY timestamp DESC
-            """)
-            declined_rows = cur.fetchall()
-            conn.close()
-
-            # ── Authenticated Report ─────────────────────────────────────────
-            doc = SimpleDocTemplate("authenticated_report.pdf", pagesize=A4)
-            elements = []
-            elements.append(Paragraph("<b>Authenticated Candidates</b>", style["Title"]))
-            elements.append(Spacer(1, 20))
-
-            data = [["Name", "Candidate ID", "Phone", "Email", "Time Authenticated"]]
-            for cid, name, ts in verified_rows:
-                phone, email = extras.get(cid, ("-", "-"))
-                # Format timestamp nicely e.g. "24 Feb 2026, 08:45:12"
-                ts_str = ts.strftime("%d %b %Y, %H:%M:%S") if hasattr(ts, "strftime") else str(ts)
-                data.append([name, str(cid), str(phone or "-"), email or "-", ts_str])
-
-            col_widths = [110, 100, 80, 130, 110]
-            table = Table(data, colWidths=col_widths)
-            table.setStyle(TableStyle([
-                ('BACKGROUND',    (0, 0), (-1, 0), colors.HexColor("#1E293B")),
-                ('TEXTCOLOR',     (0, 0), (-1, 0), colors.white),
-                ('FONTNAME',      (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ('FONTSIZE',      (0, 0), (-1, -1), 8),
-                ('GRID',          (0, 0), (-1, -1), 1, colors.HexColor("#CBD5E1")),
-                ('ALIGN',         (0, 0), (-1, -1), 'CENTER'),
-                ('VALIGN',        (0, 0), (-1, -1), 'MIDDLE'),
-                ('ROWBACKGROUNDS',(0, 1), (-1, -1),
-                 [colors.white, colors.HexColor("#F1F5F9")])
-            ]))
-            elements.append(table)
-            doc.build(elements)
-
-            # ── Declined Report ──────────────────────────────────────────────
-            doc2 = SimpleDocTemplate("declined_report.pdf", pagesize=A4)
-            elements2 = []
-            elements2.append(Paragraph("<b>Declined / Locked Candidates</b>", style["Title"]))
-            elements2.append(Spacer(1, 20))
-            if declined_rows:
-                data2 = [["Name / Note", "Candidate ID", "Declined At"]]
-                for cid, name, ts in declined_rows:
-                    ts_str = ts.strftime("%d %b %Y, %H:%M:%S") if hasattr(ts, "strftime") else str(ts)
-                    data2.append([name, str(cid), ts_str])
-
-                col_widths2 = [180, 120, 150]
-                table2 = Table(data2, colWidths=col_widths2)
-                table2.setStyle(TableStyle([
-                    ('BACKGROUND',    (0, 0), (-1, 0), colors.HexColor("#7F1D1D")),
-                    ('TEXTCOLOR',     (0, 0), (-1, 0), colors.white),
-                    ('FONTNAME',      (0, 0), (-1, 0), 'Helvetica-Bold'),
-                    ('FONTSIZE',      (0, 0), (-1, -1), 9),
-                    ('GRID',          (0, 0), (-1, -1), 1, colors.HexColor("#FECACA")),
-                    ('ALIGN',         (0, 0), (-1, -1), 'CENTER'),
-                    ('VALIGN',        (0, 0), (-1, -1), 'MIDDLE'),
-                    ('ROWBACKGROUNDS',(0, 1), (-1, -1),
-                     [colors.white, colors.HexColor("#FEF2F2")])
-                ]))
-                elements2.append(table2)
-            else:
-                elements2.append(Paragraph("No declined records.", style["Normal"]))
-            doc2.build(elements2)
-
-            print("Reports updated: authenticated_report.pdf, declined_report.pdf")
+            from reports_viewer import ReportsViewer
+            ReportsViewer._build_reports(self)
         except Exception as e:
             print(f"Report generation error: {e}")
 
